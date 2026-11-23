@@ -27,6 +27,13 @@ type ChatRun = {
   appSessionId: string;
   provider: LLMProvider;
   providerSessionId: string | null;
+  /**
+   * Set when this run replaces the session's provider session instead of
+   * continuing it (an edit of the very first prompt). The row moves only once
+   * the new session announces itself, so a run that dies first leaves the
+   * conversation where it was.
+   */
+  replacesProviderSession: boolean;
   status: ChatRunStatus;
   lastSeq: number;
   events: NormalizedMessage[];
@@ -186,7 +193,11 @@ function recordProviderSessionId(run: ChatRun, providerSessionId: string): void 
   run.providerSessionId = providerSessionId;
 
   try {
-    sessionsDb.assignProviderSessionId(run.appSessionId, providerSessionId);
+    if (run.replacesProviderSession) {
+      sessionsDb.replaceProviderSession(run.appSessionId, providerSessionId);
+    } else {
+      sessionsDb.assignProviderSessionId(run.appSessionId, providerSessionId);
+    }
     void broadcastSessionUpserted(run.appSessionId).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[ChatRunRegistry] Failed to broadcast canonical session mapping', {
@@ -245,6 +256,7 @@ export const chatRunRegistry = {
       appSessionId: input.appSessionId,
       provider: input.provider,
       providerSessionId: input.providerSessionId,
+      replacesProviderSession: false,
       status: 'running',
       lastSeq: 0,
       events: [],

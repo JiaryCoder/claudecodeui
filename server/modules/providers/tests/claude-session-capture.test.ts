@@ -10,24 +10,18 @@ import { queryClaudeSDK } from '@/modules/providers/list/claude/claude-runtime.p
 import type { AnyRecord, NormalizedMessage, ProviderRuntimeContext } from '@/shared/types.js';
 
 /**
- * Which provider session a run ends up on is decided by what it is handed.
- * A run with an id to resume keeps it. A run with none starts a new provider
- * session and has to report the new id, because that report is the only
- * thing that maps it onto the app session; otherwise the next message
- * resumes whatever the row still points at.
- *
- * An edit of a session's very first prompt depends on this: the gateway
- * detaches the session and the run starts with no id. These tests drive
- * `queryClaudeSDK` with a scripted SDK stream (the seam is
- * `context.createQuery`) and record what the runtime asks the SDK for and
- * which id it hands its writer.
+ * An edit of a session's very first prompt runs with `resumeFromScratch`
+ * while the session row still holds the conversation being replaced. The run
+ * has to report the provider session it starts, because that report is the
+ * only thing that moves the row. These drive `queryClaudeSDK` with a scripted
+ * SDK stream (the seam is `context.createQuery`).
  */
 
 const SESSION_ID = 'app-capture-session';
 const OLD_NATIVE_ID = 'native-before-edit';
 const NEW_NATIVE_ID = 'native-after-edit';
 
-async function runOneTurn(resumeId: string | null, streamedId: string): Promise<{
+async function runOneTurn(streamedId: string, runOptions: AnyRecord = {}): Promise<{
   sdkOptions: AnyRecord | null;
   reportedIds: string[];
   sent: NormalizedMessage[];
@@ -51,7 +45,8 @@ async function runOneTurn(resumeId: string | null, streamedId: string): Promise<
 
   const sessions = new ClaudeSessionsProvider({ getLiveRunStartTime: () => null });
   const context: ProviderRuntimeContext = {
-    resolveProviderSessionId: () => resumeId,
+    // The row still names the old conversation in both cases.
+    resolveProviderSessionId: () => OLD_NATIVE_ID,
     resolveResumeModel: async () => undefined,
     getProviderModels: async () => CLAUDE_PREDEFINED_MODELS as never,
     normalizeMessage: (raw, sessionId) => sessions.normalizeMessage(raw, sessionId),
@@ -65,7 +60,7 @@ async function runOneTurn(resumeId: string | null, streamedId: string): Promise<
   };
 
   try {
-    await queryClaudeSDK('hello', { sessionId: SESSION_ID, cwd }, writer as never, context);
+    await queryClaudeSDK('hello', { sessionId: SESSION_ID, cwd, ...runOptions }, writer as never, context);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -73,26 +68,18 @@ async function runOneTurn(resumeId: string | null, streamedId: string): Promise<
   return { sdkOptions, reportedIds, sent };
 }
 
-test('a run with nothing to resume reports the provider session it started', async () => {
-  const { sdkOptions, reportedIds, sent } = await runOneTurn(null, NEW_NATIVE_ID);
+test('a first-prompt edit reports the provider session it started', async () => {
+  const { sdkOptions, reportedIds, sent } = await runOneTurn(NEW_NATIVE_ID, { resumeFromScratch: true });
 
-  const options = sdkOptions as AnyRecord | null;
-  assert.equal(options?.resume, undefined);
-  assert.equal(options?.resumeSessionAt, undefined);
+  assert.equal((sdkOptions as AnyRecord | null)?.resume, undefined);
   assert.deepEqual(reportedIds, [NEW_NATIVE_ID]);
-  assert.ok(
-    sent.some((message) => message.kind === 'session_created' && (message as AnyRecord).newSessionId === NEW_NATIVE_ID),
-    'the new provider session is announced',
-  );
+  assert.ok(sent.some((message) => message.kind === 'session_created'));
 });
 
-test('a run that resumes stays on that provider session and announces nothing new', async () => {
-  const { sdkOptions, reportedIds, sent } = await runOneTurn(OLD_NATIVE_ID, OLD_NATIVE_ID);
+test('an ordinary run resumes the session it was given and reports nothing new', async () => {
+  const { sdkOptions, reportedIds, sent } = await runOneTurn(OLD_NATIVE_ID);
 
   assert.equal((sdkOptions as AnyRecord | null)?.resume, OLD_NATIVE_ID);
-  // The runtime already holds the id it resumed, so it does not report one
-  // again. That is why a run that must land on a new provider session has to
-  // start from a detached row instead of from one still holding the old id.
   assert.deepEqual(reportedIds, []);
   assert.equal(sent.some((message) => message.kind === 'session_created'), false);
 });

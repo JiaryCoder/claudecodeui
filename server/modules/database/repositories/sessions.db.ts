@@ -65,36 +65,6 @@ function normalizeSessionRows(rows: SessionRow[]): SessionRow[] {
   return rows.map((row) => normalizeSessionRow(row) as SessionRow);
 }
 
-/**
- * Records a session's provider session as superseded and detaches the session
- * from it, in one transaction. A reader in between would see the session
- * detached from a transcript that is not yet recorded as left behind, and
- * would either show an empty conversation or let the indexer take that
- * transcript for a session of its own.
- */
-function retireProviderSession(sessionId: string, reason: 'edit' | 'context_cleared'): boolean {
-  const db = getConnection();
-
-  return db.transaction(() => {
-    const session = db
-      .prepare('SELECT provider, provider_session_id, jsonl_path FROM sessions WHERE session_id = ?')
-      .get(sessionId) as Pick<SessionRow, 'provider' | 'provider_session_id' | 'jsonl_path'> | undefined;
-    if (!session?.provider_session_id) {
-      return false;
-    }
-
-    sessionsDb.markProviderSessionSuperseded({
-      providerSessionId: session.provider_session_id,
-      provider: session.provider,
-      sessionId,
-      jsonlPath: session.jsonl_path,
-      reason,
-    });
-    sessionsDb.detachProviderSession(sessionId);
-    return true;
-  })();
-}
-
 function normalizeProjectPathForProvider(provider: string, projectPath: string): string {
   void provider;
   return normalizeProjectPath(projectPath);
@@ -371,6 +341,39 @@ export const sessionsDb = {
   },
 
   /**
+   * Moves a session onto the provider session that replaced its conversation.
+   *
+   * The one it leaves is recorded as superseded so the indexer does not offer
+   * it back. The transcript path is cleared unless the indexer already saw the
+   * new file, in which case its row is merged here; otherwise the indexer
+   * fills the path in, as it does for a brand-new chat.
+   *
+   * Used by the chat run registry when an edit of the first prompt announces
+   * its new provider session.
+   */
+  replaceProviderSession(sessionId: string, providerSessionId: string): void {
+    const db = getConnection();
+
+    db.transaction(() => {
+      const session = db
+        .prepare('SELECT provider, provider_session_id, jsonl_path FROM sessions WHERE session_id = ?')
+        .get(sessionId) as Pick<SessionRow, 'provider' | 'provider_session_id' | 'jsonl_path'> | undefined;
+
+      if (session?.provider_session_id && session.provider_session_id !== providerSessionId) {
+        sessionsDb.markProviderSessionSuperseded({
+          providerSessionId: session.provider_session_id,
+          provider: session.provider,
+          sessionId,
+          jsonlPath: session.jsonl_path,
+        });
+        sessionsDb.detachProviderSession(sessionId);
+      }
+
+      sessionsDb.assignProviderSessionId(sessionId, providerSessionId);
+    })();
+  },
+
+  /**
    * Clears a session's context: retires its provider session as an earlier
    * part of the conversation and detaches the session, so the next run starts
    * a new provider session that knows nothing of what came before.
@@ -382,23 +385,26 @@ export const sessionsDb = {
    * no provider session to retire.
    */
   clearProviderSessionContext(sessionId: string): boolean {
-    return retireProviderSession(sessionId, 'context_cleared');
-  },
+    const db = getConnection();
 
-  /**
-   * Starts a session over because an edit replaced its very first prompt:
-   * retires its provider session as a discarded version and detaches the
-   * session, so the next run opens a new provider session and that run's id
-   * is mapped onto the session the way a brand-new chat's is.
-   *
-   * Used for providers that resume partway instead of rewinding on disk
-   * (Claude). Codex does the same thing inside its own `rewindSession`.
-   * Recorded as `'edit'`, so the abandoned transcript is never read back as
-   * history. Returns false, changing nothing, when the session has no
-   * provider session to retire.
-   */
-  retireProviderSessionForEdit(sessionId: string): boolean {
-    return retireProviderSession(sessionId, 'edit');
+    return db.transaction(() => {
+      const session = db
+        .prepare('SELECT provider, provider_session_id, jsonl_path FROM sessions WHERE session_id = ?')
+        .get(sessionId) as Pick<SessionRow, 'provider' | 'provider_session_id' | 'jsonl_path'> | undefined;
+      if (!session?.provider_session_id) {
+        return false;
+      }
+
+      sessionsDb.markProviderSessionSuperseded({
+        providerSessionId: session.provider_session_id,
+        provider: session.provider,
+        sessionId,
+        jsonlPath: session.jsonl_path,
+        reason: 'context_cleared',
+      });
+      sessionsDb.detachProviderSession(sessionId);
+      return true;
+    })();
   },
 
   /**

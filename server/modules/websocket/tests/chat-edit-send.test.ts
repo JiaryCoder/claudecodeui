@@ -146,8 +146,7 @@ test('an edit resumes through the turn before the one being replaced', async () 
     assert.equal(runs[0].command, 'a better second prompt');
     // Inclusive of the row it names, so this is the last turn KEPT.
     assert.equal(runs[0].options.resumeAnchorId, 'e-a1');
-    // A partway resume stays on the same provider session.
-    assert.equal(sessionsDb.getSessionById(SESSION_ID)?.provider_session_id, SESSION_ID);
+    assert.equal(runs[0].options.resumeFromScratch, false);
   });
 });
 
@@ -163,20 +162,12 @@ test('editing the first prompt starts the conversation over', async () => {
 
     assert.equal(runs.length, 1);
     assert.equal(runs[0].options.resumeAnchorId, undefined);
-    // Detached before the run, so the runtime finds no provider id to resume
-    // and starts a new provider session. It only reads an id off its stream
-    // when it starts without one, so this is what lets the new id be mapped.
-    assert.equal(sessionsService.resolveProviderSessionId(SESSION_ID), null);
-    assert.equal(sessionsDb.getSessionById(SESSION_ID)?.jsonl_path, null);
-    // The edited-away transcript is a discarded version: the indexer must not
-    // offer it back, but deleting the conversation still has to reach it.
-    assert.equal(sessionsDb.isProviderSessionSuperseded(SESSION_ID, 'claude'), true);
-    assert.equal(sessionsDb.getSupersededTranscriptPaths(SESSION_ID).length, 1);
-    assert.deepEqual(sessionsDb.getClearedContextSegments(SESSION_ID), []);
+    assert.equal(runs[0].options.resumeFromScratch, true);
   });
 });
 
-test('after a first-prompt edit, the next message resumes the new conversation, not the edited one', async () => {
+test('a first-prompt edit moves the session once the new provider session announces itself', async () => {
+  holdTheNextRun();
   await withGateway('claude', async ({ socket, runs }) => {
     socket.emit('message', JSON.stringify({
       type: 'chat.edit-send',
@@ -185,36 +176,38 @@ test('after a first-prompt edit, the next message resumes the new conversation, 
       content: 'a better first prompt',
     }));
     await settle();
+    assert.equal(runs.length, 1);
 
-    // What the Claude runtime does when it starts without an id: it reads the
-    // new one off its stream and hands it to the run's writer.
-    const run = chatRunRegistry.getRun(SESSION_ID);
-    assert.ok(run, 'the edit started a run');
-    run.writer.setSessionId('new-native-session');
-    assert.equal(sessionsDb.getSessionById(SESSION_ID)?.provider_session_id, 'new-native-session');
+    // Running, but nothing announced yet: the row stays on the old conversation.
+    assert.equal(sessionsDb.getSessionById(SESSION_ID)?.provider_session_id, SESSION_ID);
+    assert.equal(sessionsDb.isProviderSessionSuperseded(SESSION_ID, 'claude'), false);
 
-    socket.emit('message', JSON.stringify({
-      type: 'chat.send',
-      sessionId: SESSION_ID,
-      content: 'a follow-up',
-    }));
-    await settle();
+    chatRunRegistry.getRun(SESSION_ID)?.writer.setSessionId('native-after-edit');
 
-    assert.equal(runs.length, 2);
-    assert.equal(sessionsService.resolveProviderSessionId(SESSION_ID), 'new-native-session');
+    const row = sessionsDb.getSessionById(SESSION_ID);
+    assert.equal(row?.provider_session_id, 'native-after-edit');
+    assert.equal(row?.jsonl_path, null);
+    // A discarded version: never offered back, still reachable for deletion.
+    assert.equal(sessionsDb.isProviderSessionSuperseded(SESSION_ID, 'claude'), true);
+    assert.equal(sessionsDb.getSupersededTranscriptPaths(SESSION_ID).length, 1);
+    assert.deepEqual(sessionsDb.getClearedContextSegments(SESSION_ID), []);
   });
 });
 
-test('a partway edit leaves nothing superseded', async () => {
-  await withGateway('claude', async ({ socket }) => {
+test('a first-prompt edit whose run dies before announcing leaves the conversation in place', async () => {
+  await withGateway('claude', async ({ socket, runs }) => {
     socket.emit('message', JSON.stringify({
       type: 'chat.edit-send',
       sessionId: SESSION_ID,
-      anchorId: 'e-u2',
-      content: 'a better second prompt',
+      anchorId: 'e-u1',
+      content: 'a prompt whose run never starts',
     }));
     await settle();
+    assert.equal(runs.length, 1);
 
+    const row = sessionsDb.getSessionById(SESSION_ID);
+    assert.equal(row?.provider_session_id, SESSION_ID);
+    assert.ok(row?.jsonl_path);
     assert.equal(sessionsDb.isProviderSessionSuperseded(SESSION_ID, 'claude'), false);
   });
 });

@@ -111,11 +111,9 @@ emits `session_created`, but only when there was nothing to resume. Both land in
 `recordProviderSessionId`.
 
 **Capture is not "first one wins".** Repeating the id already held is a no-op in both
-functions, and a *different* id replaces the mapping. The runtime only reads an id off its
-stream when it started without one, though: `queryClaudeSDK` seeds its captured id with the
-id it resumed, so a run that resumed never announces again. A run that must end up on a new
-provider session therefore has to start from a detached row, which is what an edit of the
-very first prompt does (see below).
+functions. A *different* id replaces the mapping, and that is deliberate: a Claude edit of
+the very first prompt runs with `resumeFromScratch`, the SDK announces a brand-new native
+id, and the row has to follow it.
 
 Reading in the other direction, runtimes receive the **app** id and translate it themselves.
 `provider-runtime.service.ts` injects `context.resolveProviderSessionId`, which is
@@ -153,14 +151,12 @@ stateDiagram-v2
 `sessionsService.fetchHistory` short-circuits on a NULL `provider_session_id`. So during the
 very first turn the transcript on screen is entirely realtime rows.
 
-An edit of the very first prompt brings a session back to `Pending`, because nothing
-survives the cut. Codex does it inside `CodexSessionsProvider.rewindSession`, which calls
-`markProviderSessionSuperseded` and then `detachProviderSession`. For Claude,
-`handleChatEditSend` calls `sessionsService.restartSessionForEdit`, which does the same
-through `sessionsDb.retireProviderSessionForEdit`. Either way the run that follows starts
-with no id to resume, and the new id is mapped the way a brand-new chat's is. Context
-clearing reaches `Pending` the same way, with the old transcript recorded as
-`context_cleared` instead of `edit`.
+Only a provider that rewinds by branching reaches `Pending` again:
+`CodexSessionsProvider.rewindSession` calls `markProviderSessionSuperseded` and then
+`detachProviderSession` when nothing survives the cut. Claude never sits in `Pending`: it
+re-runs with `resumeFromScratch`, the run is flagged `replacesProviderSession`, and
+`sessionsDb.replaceProviderSession` moves the row only when the SDK announces its new id, so
+a run that dies before announcing leaves the conversation where it was.
 
 ## Starting a new conversation
 
@@ -330,7 +326,7 @@ id, today Claude's message uuid and Codex's enclosing turn id.
 
 | Provider shape | Chosen because | What the run receives |
 | --- | --- | --- |
-| Resume partway (Claude) | The SDK has `resumeSessionAt` | The `resumeAnchorId` run option; nothing on disk is rewritten. An edit of the first prompt has no anchor, so the session is detached first (`restartSessionForEdit`) and the run starts a new provider session |
+| Resume partway (Claude) | The SDK has `resumeSessionAt` | `resumeAnchorId` and `resumeFromScratch` run options; nothing on disk is rewritten |
 | Rewind first (Codex) | A thread only grows; `thread/fork` is the only cut | No extra options. The row is repointed to the forked thread, then run as an ordinary resume |
 
 Both paths emit `history_truncated` through `run.writer` *before* the rewind, inside
@@ -511,7 +507,7 @@ conversation takes.
 | --- | --- |
 | `ChatSessionWriter.send` | `chat-run-registry.test.ts` ("session_created is swallowed and persisted as the provider-id mapping"), and that no frame can escape without `sessionId` remapped and a `seq` |
 | `decorateAndRecordEvent` | The exactly-one-`complete` contract, `replayEvents` ordering, and `MAX_BUFFERED_EVENTS_PER_RUN` truncation |
-| `captureProviderSessionId` or `recordProviderSessionId` | That a *different* announced id still remaps the row, and that a run which must land on a new provider session starts from a detached row — the runtime does not announce again after a resume |
+| `captureProviderSessionId` or `recordProviderSessionId` | That a *different* announced id still remaps the row — Claude's `resumeFromScratch` path depends on it |
 | `sessionsDb.assignProviderSessionId` | `sessions-provider-mapping.test.ts`, plus `repointSessionToProviderSession` and `detachProviderSession`, which must stay distinct |
 | `handleChatSubscribe` | The client's `lastSeqRef` semantics, the "completed runs are not replayed" rule, and the reconnect ordering in `ChatInterface.handleWebSocketReconnect` |
 | `truncateAt` | `removeOptimisticUserEchoes` (`replacesAfterRowCount`), `readSortTime` (`replacesAnchorId`), and `sessionStoreTruncate.test.tsx` |
