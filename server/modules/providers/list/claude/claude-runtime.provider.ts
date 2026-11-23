@@ -1158,7 +1158,12 @@ async function queryClaudeSDK(
   const { sessionId, sessionSummary } = options;
   // Callers pass the stable app session id; the SDK only understands the
   // provider-native id recorded on the session row.
-  const providerSessionId = context.resolveProviderSessionId(sessionId);
+  // An edit of the very first prompt has nothing to resume, so this run starts
+  // a new provider session and has to report its id like a brand-new chat,
+  // even though the session row still names the conversation being replaced.
+  const providerSessionId = options.resumeFromScratch
+    ? null
+    : context.resolveProviderSessionId(sessionId);
   // Provider-native id as the SDK reports it (starts as the resume id, or is
   // captured from the stream for brand-new sessions).
   let capturedSessionId = providerSessionId;

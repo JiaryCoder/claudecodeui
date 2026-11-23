@@ -166,6 +166,52 @@ test('editing the first prompt starts the conversation over', async () => {
   });
 });
 
+test('a first-prompt edit moves the session once the new provider session announces itself', async () => {
+  holdTheNextRun();
+  await withGateway('claude', async ({ socket, runs }) => {
+    socket.emit('message', JSON.stringify({
+      type: 'chat.edit-send',
+      sessionId: SESSION_ID,
+      anchorId: 'e-u1',
+      content: 'a better first prompt',
+    }));
+    await settle();
+    assert.equal(runs.length, 1);
+
+    // Running, but nothing announced yet: the row stays on the old conversation.
+    assert.equal(sessionsDb.getSessionById(SESSION_ID)?.provider_session_id, SESSION_ID);
+    assert.equal(sessionsDb.isProviderSessionSuperseded(SESSION_ID, 'claude'), false);
+
+    chatRunRegistry.getRun(SESSION_ID)?.writer.setSessionId('native-after-edit');
+
+    const row = sessionsDb.getSessionById(SESSION_ID);
+    assert.equal(row?.provider_session_id, 'native-after-edit');
+    assert.equal(row?.jsonl_path, null);
+    // A discarded version: never offered back, still reachable for deletion.
+    assert.equal(sessionsDb.isProviderSessionSuperseded(SESSION_ID, 'claude'), true);
+    assert.equal(sessionsDb.getSupersededTranscriptPaths(SESSION_ID).length, 1);
+    assert.deepEqual(sessionsDb.getClearedContextSegments(SESSION_ID), []);
+  });
+});
+
+test('a first-prompt edit whose run dies before announcing leaves the conversation in place', async () => {
+  await withGateway('claude', async ({ socket, runs }) => {
+    socket.emit('message', JSON.stringify({
+      type: 'chat.edit-send',
+      sessionId: SESSION_ID,
+      anchorId: 'e-u1',
+      content: 'a prompt whose run never starts',
+    }));
+    await settle();
+    assert.equal(runs.length, 1);
+
+    const row = sessionsDb.getSessionById(SESSION_ID);
+    assert.equal(row?.provider_session_id, SESSION_ID);
+    assert.ok(row?.jsonl_path);
+    assert.equal(sessionsDb.isProviderSessionSuperseded(SESSION_ID, 'claude'), false);
+  });
+});
+
 test('every subscribed client is told to drop the superseded turns', async () => {
   await withGateway('claude', async ({ socket }) => {
     socket.emit('message', JSON.stringify({

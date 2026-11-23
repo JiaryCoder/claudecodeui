@@ -571,6 +571,10 @@ async function handleChatEditSend(
         anchorId,
       });
 
+      // Nothing precedes an edited first prompt, so the run starts a new
+      // provider session. The row follows it when it announces its id.
+      run.replacesProviderSession = !rewinds && resumeThroughId === null;
+
       if (rewinds) {
         try {
           await sessionsService.rewindSessionForEdit(sessionId, resumeThroughId);

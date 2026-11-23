@@ -341,6 +341,39 @@ export const sessionsDb = {
   },
 
   /**
+   * Moves a session onto the provider session that replaced its conversation.
+   *
+   * The one it leaves is recorded as superseded so the indexer does not offer
+   * it back. The transcript path is cleared unless the indexer already saw the
+   * new file, in which case its row is merged here; otherwise the indexer
+   * fills the path in, as it does for a brand-new chat.
+   *
+   * Used by the chat run registry when an edit of the first prompt announces
+   * its new provider session.
+   */
+  replaceProviderSession(sessionId: string, providerSessionId: string): void {
+    const db = getConnection();
+
+    db.transaction(() => {
+      const session = db
+        .prepare('SELECT provider, provider_session_id, jsonl_path FROM sessions WHERE session_id = ?')
+        .get(sessionId) as Pick<SessionRow, 'provider' | 'provider_session_id' | 'jsonl_path'> | undefined;
+
+      if (session?.provider_session_id && session.provider_session_id !== providerSessionId) {
+        sessionsDb.markProviderSessionSuperseded({
+          providerSessionId: session.provider_session_id,
+          provider: session.provider,
+          sessionId,
+          jsonlPath: session.jsonl_path,
+        });
+        sessionsDb.detachProviderSession(sessionId);
+      }
+
+      sessionsDb.assignProviderSessionId(sessionId, providerSessionId);
+    })();
+  },
+
+  /**
    * Clears a session's context: retires its provider session as an earlier
    * part of the conversation and detaches the session, so the next run starts
    * a new provider session that knows nothing of what came before.

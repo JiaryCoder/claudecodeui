@@ -153,8 +153,10 @@ very first turn the transcript on screen is entirely realtime rows.
 
 Only a provider that rewinds by branching reaches `Pending` again:
 `CodexSessionsProvider.rewindSession` calls `markProviderSessionSuperseded` and then
-`detachProviderSession` when nothing survives the cut. Claude never detaches — it re-runs
-with `resumeFromScratch` and the row is remapped when the SDK announces its new id.
+`detachProviderSession` when nothing survives the cut. Claude never sits in `Pending`: it
+re-runs with `resumeFromScratch`, the run is flagged `replacesProviderSession`, and
+`sessionsDb.replaceProviderSession` moves the row only when the SDK announces its new id, so
+a run that dies before announcing leaves the conversation where it was.
 
 ## Starting a new conversation
 
