@@ -615,6 +615,36 @@ export const sessionsService = {
   },
 
   /**
+   * Starts a session's conversation over because an edit replaced its very
+   * first prompt, for providers that resume partway instead of rewinding on
+   * disk.
+   *
+   * Nothing comes before that prompt, so there is nothing to resume through.
+   * The session lets go of its provider session, and the run that follows
+   * starts a new one and maps its id onto the session, as a brand-new chat
+   * does. If the session stayed attached, the runtime would start fresh
+   * while the row still pointed at the old transcript, and the next message
+   * would resume the conversation the user had just edited away.
+   *
+   * Used by the chat gateway's edit path. Like `rewindSessionForEdit`, only
+   * call it once the run has been admitted.
+   */
+  restartSessionForEdit(sessionId: string): void {
+    const session = sessionsDb.getSessionById(sessionId);
+    if (!session) {
+      throw new AppError(`Session "${sessionId}" was not found.`, {
+        code: 'SESSION_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+
+    if (sessionsDb.retireProviderSessionForEdit(sessionId)) {
+      // The cached history belongs to the transcript the session just left.
+      sessionHistoryCache.invalidate(sessionId);
+    }
+  },
+
+  /**
    * Clears a session's context. The session keeps its id, its name and its
    * whole visible history; the next message starts a new provider session, so
    * the model reads none of what came before.

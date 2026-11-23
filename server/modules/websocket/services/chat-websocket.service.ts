@@ -537,6 +537,12 @@ async function handleChatEditSend(
   // the run that follows is an ordinary resume of whatever the session then
   // points at. Which of the two applies is decided here; the rewind itself
   // waits until the run has actually been admitted.
+  //
+  // A `null` resume point means the edited turn was the first prompt.
+  // Nothing comes before it to resume through, so for every provider the
+  // session is detached before the run and the run starts a new provider
+  // session: Codex does this inside its rewind, Claude through
+  // `restartSessionForEdit` below.
   const rewinds = sessionsService.providerRewindsForEdit(sessionId);
 
   await dispatchRun(
@@ -546,11 +552,7 @@ async function handleChatEditSend(
     session,
     data,
     dependencies,
-    // `null` is meaningful: the edited turn was the first prompt, so the
-    // conversation starts over instead of resuming.
-    rewinds
-      ? {}
-      : { resumeAnchorId: resumeThroughId ?? undefined, resumeFromScratch: resumeThroughId === null },
+    rewinds ? {} : { resumeAnchorId: resumeThroughId ?? undefined },
     async (run) => {
       // Emitted through the run's writer so it is sequenced and replayed like
       // any other event — a second tab watching this session has to truncate
@@ -571,9 +573,13 @@ async function handleChatEditSend(
         anchorId,
       });
 
-      if (rewinds) {
+      if (rewinds || resumeThroughId === null) {
         try {
-          await sessionsService.rewindSessionForEdit(sessionId, resumeThroughId);
+          if (rewinds) {
+            await sessionsService.rewindSessionForEdit(sessionId, resumeThroughId);
+          } else {
+            sessionsService.restartSessionForEdit(sessionId);
+          }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           sendProtocolError(ws, 'EDIT_REWIND_FAILED', `Could not rewind the conversation: ${message}`, sessionId);
