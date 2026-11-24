@@ -184,6 +184,41 @@ export function mergeLatestServerPage(
 }
 
 /**
+ * Stitches a tail that was rewritten rather than extended.
+ *
+ * `mergeLatestServerPage` needs the cached rows to end where the fetched ones
+ * begin, which holds only while the transcript grows. Editing a message swaps
+ * the rows after the cut for another branch, so a cache read before the swap
+ * ends in rows the server no longer serves. The two still share the history
+ * above the cut, and the fetched rows are authoritative from where they start.
+ *
+ * Returns null when the windows share no boundary row, because the rows between
+ * them are then unknown.
+ */
+export function spliceRewrittenTail(
+  cachedMessages: NormalizedMessage[],
+  fetchedMessages: NormalizedMessage[],
+): { messages: NormalizedMessage[]; keptCachedCount: number } | null {
+  const cachedOldest = cachedMessages[0];
+  const fetchedOldest = fetchedMessages[0];
+  if (!cachedOldest || !fetchedOldest) return null;
+
+  for (let index = cachedMessages.length - 1; index >= 0; index--) {
+    if (messagesRepresentSamePersistedRow(cachedMessages[index], fetchedOldest)) {
+      return {
+        messages: [...cachedMessages.slice(0, index), ...fetchedMessages],
+        keptCachedCount: index,
+      };
+    }
+  }
+
+  // The fetched window starts above the cached one and covers all of it.
+  return fetchedMessages.some((message) => messagesRepresentSamePersistedRow(message, cachedOldest))
+    ? { messages: fetchedMessages, keptCachedCount: 0 }
+    : null;
+}
+
+/**
  * Reconciles a tail-offset older-page response with the cached suffix when the
  * transcript grew while that request was in flight. With no overlap the page
  * is treated as the normal immediately-preceding page.

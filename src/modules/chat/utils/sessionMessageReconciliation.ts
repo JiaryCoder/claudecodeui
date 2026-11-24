@@ -40,6 +40,7 @@ function readMessageTime(message: NormalizedMessage): number | null {
 function findServerEchoForLocalUser(
   localMessage: NormalizedMessage,
   serverMessages: NormalizedMessage[],
+  serverRowsBeforeWindow: number,
   claimedServerIds: Set<string>,
 ): NormalizedMessage | null {
   const localFingerprint = userTurnFingerprint(localMessage);
@@ -54,7 +55,12 @@ function findServerEchoForLocalUser(
   // the moment of the copy, so an earlier turn with the same words — "yes",
   // "continue", the typo being corrected — lands inside the window and would
   // retire the message the user just sent.
-  const firstEligibleIndex = localMessage.replacesAfterRowCount ?? 0;
+  // The cut is counted from the start of the conversation, while
+  // `serverMessages` may be only its newest page.
+  const firstEligibleIndex = Math.max(
+    0,
+    (localMessage.replacesAfterRowCount ?? 0) - serverRowsBeforeWindow,
+  );
 
   const dedupeWindow = localFingerprint.text
     ? LOCAL_USER_DEDUPE_WINDOW_MS
@@ -95,10 +101,14 @@ function findServerEchoForLocalUser(
 /**
  * Removes local optimistic user rows once a corresponding persisted turn is
  * available. Matches are one-to-one so repeated sends cannot claim one row.
+ *
+ * `serverRowsBeforeWindow` is how many persisted rows precede
+ * `serverMessages[0]` when only the newest page is loaded.
  */
 export function removeOptimisticUserEchoes(
   serverMessages: NormalizedMessage[],
   realtimeMessages: NormalizedMessage[],
+  serverRowsBeforeWindow = 0,
 ): NormalizedMessage[] {
   const claimedServerIds = new Set<string>();
 
@@ -107,7 +117,12 @@ export function removeOptimisticUserEchoes(
       return true;
     }
 
-    const serverEcho = findServerEchoForLocalUser(message, serverMessages, claimedServerIds);
+    const serverEcho = findServerEchoForLocalUser(
+      message,
+      serverMessages,
+      serverRowsBeforeWindow,
+      claimedServerIds,
+    );
     if (!serverEcho) {
       return true;
     }

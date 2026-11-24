@@ -224,3 +224,101 @@ describe('truncateAt', () => {
     );
   });
 });
+
+/**
+ * A session longer than one page, so the loaded window starts partway through
+ * the transcript and a position in it is not a position in the conversation.
+ */
+describe('truncateAt in a session longer than one page', () => {
+  const at = (second: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, second)).toISOString();
+  const turn = (index: number): NormalizedMessage[] => [
+    { ...row(`p${index}`, `prompt ${index}`, `p${index}`), timestamp: at(index * 2) },
+    { ...row(`a${index}`, `answer ${index}`), timestamp: at(index * 2 + 1) },
+  ];
+  const KEPT = Array.from({ length: 30 }, (_, index) => turn(index)).flat();
+  const ABANDONED = [
+    { ...row('old', 'stop the test', 'old'), timestamp: at(100) },
+    { ...row('old-answer', 'stopping'), timestamp: at(101) },
+  ];
+  const REPLACEMENT = [
+    { ...row('new', 'stop the test, I will merge', 'new'), timestamp: at(109) },
+    { ...row('new-answer', 'stopped'), timestamp: at(112) },
+  ];
+
+  let served: NormalizedMessage[] = [];
+
+  beforeEach(() => {
+    sessionMessages.mockImplementation(
+      async (_sessionId: string, options: { limit?: number | null; offset?: number }) => {
+        const end = Math.max(0, served.length - (options.offset ?? 0));
+        const start = options.limit == null ? 0 : Math.max(0, end - options.limit);
+        return {
+          ok: true,
+          json: async () => ({
+            data: { messages: served.slice(start, end), total: served.length, hasMore: start > 0 },
+          }),
+        };
+      },
+    );
+  });
+
+  async function editedStore() {
+    served = [...KEPT, ...ABANDONED];
+    const view = await loadedStore();
+    act(() => {
+      view.result.current.appendRealtime('session-1', {
+        ...row('local_echo', 'stop the test, I will merge', 'unused'),
+        transcriptAnchorId: undefined,
+        timestamp: at(110),
+        replacesAnchorId: 'old',
+      } as NormalizedMessage);
+      view.result.current.truncateAt('session-1', 'old');
+    });
+    return view;
+  }
+
+  const lastUserIds = (messages: NormalizedMessage[]) =>
+    messages.filter((message) => message.role === 'user').slice(-2).map((message) => message.id);
+
+  it('retires the replacement echo when the chat is reopened on a fresh page', async () => {
+    const { result } = await editedStore();
+
+    served = [...KEPT, ...REPLACEMENT, ...turn(60)];
+    await act(async () => {
+      await result.current.fetchFromServer('session-1', { limit: 20, offset: 0 });
+    });
+
+    const ids = result.current.getMessages('session-1').map((message) => message.id);
+    assert.equal(ids.includes('local_echo'), false);
+    assert.equal(ids.filter((id) => id === 'new').length, 1);
+  });
+
+  it('recovers when a mid-run refresh brought the abandoned branch back', async () => {
+    const { result } = await editedStore();
+
+    // Until the run stamps its leaf the server still serves the old branch.
+    await act(async () => {
+      await result.current.refreshLatestFromServer('session-1');
+    });
+
+    served = [...KEPT, ...REPLACEMENT];
+    await act(async () => {
+      await result.current.refreshLatestFromServer('session-1');
+    });
+
+    const messages = result.current.getMessages('session-1');
+    assert.deepEqual(lastUserIds(messages), ['p29', 'new']);
+    assert.equal(messages.some((message) => message.id === 'old-answer'), false);
+  });
+
+  it('keeps the echo while the replacement is not persisted yet', async () => {
+    const { result } = await editedStore();
+
+    served = KEPT;
+    await act(async () => {
+      await result.current.fetchFromServer('session-1', { limit: 20, offset: 0 });
+    });
+
+    assert.deepEqual(lastUserIds(result.current.getMessages('session-1')), ['p29', 'local_echo']);
+  });
+});

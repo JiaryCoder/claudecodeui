@@ -572,6 +572,10 @@ export type NormalizedMessage = {
    * with the same words then sits inside the window and retires the message
    * the user just sent. The replacement can only be a row that was not there
    * when the cut was made, so this is where those rows begin.
+   *
+   * Counted from the start of the conversation, not from the loaded window:
+   * a long session loads only its newest page, and the window moves under the
+   * echo whenever the chat is reopened or an older page is scrolled in.
    */
   replacesAfterRowCount?: number;
   sessionId: string;
