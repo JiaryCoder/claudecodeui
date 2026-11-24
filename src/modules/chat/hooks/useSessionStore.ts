@@ -20,6 +20,7 @@ import {
   planLatestPageBridge,
   resolveLatestPagePagination,
   SESSION_MESSAGES_PAGE_SIZE,
+  spliceRewrittenTail,
 } from '@/modules/chat/utils/sessionMessagePagination';
 import type { SessionMessagesRequestOptions } from '@/modules/chat/utils/sessionMessagePagination';
 
@@ -82,6 +83,15 @@ type SessionHistoryPage = {
   hasMore: boolean;
   tokenUsage?: unknown;
 };
+
+/**
+ * How many persisted rows sit above the loaded window. `serverMessages` is
+ * always a contiguous tail of the transcript and `total` counts the whole of
+ * it, so the difference is where the window starts.
+ */
+function rowsBeforeWindow(slot: SessionSlot): number {
+  return Math.max(0, slot.total - slot.serverMessages.length);
+}
 
 function enqueueHistoryMutation<T>(
   slot: SessionSlot,
@@ -304,13 +314,18 @@ function dedupeAdjacentAssistantEchoes(merged: NormalizedMessage[]): NormalizedM
 function pruneRealtimeSupersededByServer(
   serverMessages: NormalizedMessage[],
   realtimeMessages: NormalizedMessage[],
+  serverRowsBeforeWindow: number,
 ): NormalizedMessage[] {
   if (realtimeMessages.length === 0) {
     return realtimeMessages;
   }
 
   const serverIds = new Set(serverMessages.map((message) => message.id));
-  const reconciledRealtimeMessages = removeOptimisticUserEchoes(serverMessages, realtimeMessages);
+  const reconciledRealtimeMessages = removeOptimisticUserEchoes(
+    serverMessages,
+    realtimeMessages,
+    serverRowsBeforeWindow,
+  );
 
   return reconciledRealtimeMessages.filter((message) => {
     if (serverIds.has(message.id)) {
@@ -345,7 +360,11 @@ function pruneRealtimeSupersededByServer(
   });
 }
 
-function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
+function computeMerged(
+  server: NormalizedMessage[],
+  realtime: NormalizedMessage[],
+  serverRowsBeforeWindow: number,
+): NormalizedMessage[] {
   if (realtime.length === 0) {
     return dedupeAdjacentAssistantEchoes(server);
   }
@@ -354,7 +373,7 @@ function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[
   }
 
   const serverIds = new Set(server.map((message) => message.id));
-  const reconciledRealtime = removeOptimisticUserEchoes(server, realtime);
+  const reconciledRealtime = removeOptimisticUserEchoes(server, realtime, serverRowsBeforeWindow);
   const extra = reconciledRealtime.filter((message) => {
     if (serverIds.has(message.id)) {
       return false;
@@ -391,7 +410,7 @@ function recomputeMergedIfNeeded(slot: SessionSlot): boolean {
   }
   slot._lastServerRef = slot.serverMessages;
   slot._lastRealtimeRef = slot.realtimeMessages;
-  slot.merged = computeMerged(slot.serverMessages, slot.realtimeMessages);
+  slot.merged = computeMerged(slot.serverMessages, slot.realtimeMessages, rowsBeforeWindow(slot));
   return true;
 }
 
@@ -517,6 +536,12 @@ async function refreshLatestSlotFromServer(
         previousHasMore,
         oldestFetchedPage.hasMore,
       ).hasMore;
+    } else {
+      const spliced = spliceRewrittenTail(previousServerMessages, fetchedWindow);
+      if (spliced) {
+        nextServerMessages = spliced.messages;
+        nextHasMore = spliced.keptCachedCount > 0 ? previousHasMore : oldestFetchedPage.hasMore;
+      }
     }
   }
 
@@ -542,6 +567,7 @@ async function refreshLatestSlotFromServer(
   slot.realtimeMessages = pruneRealtimeSupersededByServer(
     slot.serverMessages,
     slot.realtimeMessages,
+    rowsBeforeWindow(slot),
   );
   recomputeMergedIfNeeded(slot);
 
@@ -619,6 +645,7 @@ export function useSessionStore() {
         slot.realtimeMessages = pruneRealtimeSupersededByServer(
           slot.serverMessages,
           slot.realtimeMessages,
+          rowsBeforeWindow(slot),
         );
         recomputeMergedIfNeeded(slot);
         if (data.tokenUsage !== undefined) {
@@ -730,6 +757,11 @@ export function useSessionStore() {
     );
     if (cutIndex < 0) return;
 
+    // `cutIndex` is a position in the loaded window, which for a long session
+    // is only its newest page. The echo outlives that window — reopening the
+    // chat loads a fresh tail, and scrolling up prepends older rows — so the
+    // cut it carries is counted from the start of the conversation instead.
+    const keptRowCount = rowsBeforeWindow(slot) + cutIndex;
     slot.serverMessages = slot.serverMessages.slice(0, cutIndex);
     // Anything already streamed belonged to the turn being replaced — except
     // the replacement itself. The client that made the edit appends its
@@ -746,11 +778,12 @@ export function useSessionStore() {
       // Stamped here because this is the only place that knows how much of the
       // conversation survived, which is what tells the echo apart from the
       // turns it now sits after.
-      ? [{ ...replacements[replacements.length - 1], replacesAfterRowCount: cutIndex }]
+      ? [{ ...replacements[replacements.length - 1], replacesAfterRowCount: keptRowCount }]
       : EMPTY;
     // `total` counts what the server would serve; it is about to be re-fetched
     // anyway, but leaving it high makes the pager offer pages that do not exist.
-    slot.total = slot.serverMessages.length;
+    // The rows above the window survive the cut, so they still count.
+    slot.total = keptRowCount;
     slot.offset = slot.serverMessages.length;
     recomputeMergedIfNeeded(slot);
     notify(sessionId);
